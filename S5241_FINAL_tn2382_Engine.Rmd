@@ -1,0 +1,459 @@
+---
+title: "Reporting Engine: 2015 NYC Street Trees Census"
+author: "Nguyen Thuy Linh, tn2382"
+output: flexdashboard::flex_dashboard
+runtime: shiny
+---
+
+```{r libraries, message = FALSE}
+library(flexdashboard)
+library(prettydoc)
+library(rmarkdown)
+library(knitr)
+library(Hmisc)
+library(DT)
+library(data.table)
+library(ggmap)
+library(ggplot2)
+library(glmnet)
+library(nnet)
+library(MASS)
+library(rpart)
+library(ipred)
+library(randomForest)
+library(caret)
+
+assignInNamespace("cedta.override", c(data.table:::cedta.override,"rmarkdown"), "data.table")
+
+opts_chunk$set(echo = FALSE, comment="", warning = FALSE, message = FALSE, tidy.opts=list(width.cutoff=55), tidy = TRUE)
+```
+
+```{r functions}
+# Functions below were written by professor David Shilane
+round.numerics <- function(x, digits = 0, nearest = 1){
+  if(is.numeric(x)){
+    return(nearest * round(x = x/nearest, digits = digits))
+  }
+  else{
+    return(x)
+  }
+}
+
+create.formula <- function(outcome.name, input.names, input.patterns = NA, all.data.names = NA, include.backtick = "as.needed", return.as = "formula"){
+  
+  variable.names.from.patterns <- c()
+  if(!is.na(input.patterns[1]) & !is.na(all.data.names[1])){
+    pattern <- paste(input.patterns, collapse = "|")
+    variable.names.from.patterns <- all.data.names[grep(pattern = pattern, x = all.data.names)]
+  }
+  all.input.names <- unique(c(input.names, variable.names.from.patterns))
+  all.input.names <- all.input.names[all.input.names != outcome.name]
+  
+  if(!is.na(all.data.names[1])){
+    all.input.names <- all.input.names[all.input.names %in% all.data.names]
+  }
+
+  input.names.delineated <- add.backtick(x =  all.input.names, include.backtick = include.backtick)
+  outcome.name.delineated <- add.backtick(x = outcome.name, include.backtick = include.backtick)
+  the.formula <- sprintf("%s ~ %s", outcome.name.delineated, paste(input.names.delineated, collapse = "+"))
+  
+  if(return.as == "formula"){
+    return(as.formula(the.formula))
+  }
+  if(return.as != "formula"){
+    return(the.formula)
+  }
+}
+
+add.backtick <- function(x, include.backtick = "as.needed"){
+  if(include.backtick == "all"){
+    w <- 1:length(x)
+  }
+  if(include.backtick == "as.needed"){
+    w <- grep(pattern = " ", x = x, fixed = TRUE)
+  }  
+  if(length(w) > 0){
+    x[w] <- sprintf("`%s`", x[w])
+  }
+
+  return(x)
+}
+
+create.x.and.y <- function(the.formula, data) {
+    require(data.table)
+    setDT(data)
+    x <- model.matrix(object = as.formula(the.formula), 
+        data = data)
+    y.name <- trimws(x = gsub(pattern = "`", replacement = "", 
+        x = strsplit(x = as.character(the.formula), split = "~")[[2]][1], 
+        fixed = TRUE))
+    y <- data[as.numeric(rownames(x)), get(y.name)]
+    return(list(x = x, y = y))
+}
+
+```
+
+```{r names_and_constants}
+# Main variables
+species.name <- "spc_common"
+root1.name <- "root_stone"
+root2.name <- "root_grate"
+root3.name <- "root_other"
+trnk1.name <- "trnk_wire"
+trnk2.name <- "trnk_light"
+trnk3.name <- "trnk_other"
+brnch1.name <- "brnch_ligh"
+brnch2.name <- "brnch_shoe"
+brnch3.name <- "brnch_othe"
+health.name <- "health"
+boro.name <- "boroname"
+senate.name <- "st_senate"
+dbh.name <- "tree_dbh"
+steward.name <- "steward"
+guards.name <- "guards"
+sidewalk.name <- "sidewalk"
+curb.name <- "curb_loc"
+user.name <- "user_type"
+
+# Chosen categorical and continuous variables
+cat.names <- c("curb_loc", "status", "health", "spc_common", "steward", "guards", "sidewalk", "user_type", "problems", "root_stone", "root_grate", "root_other", "trnk_wire", "trnk_light", "trnk_other", "brnch_ligh", "brnch_shoe", "brnch_othe", "st_senate","boroname", "st_assem", "st_senate", "nta")
+con.names <- c("tree_dbh", "cncldist")
+
+inputs1 <- c(health.name, trnk1.name, trnk2.name, trnk3.name, root1.name, root2.name, root3.name, brnch1.name, brnch2.name, brnch3.name, boro.name, dbh.name, steward.name, guards.name, curb.name, sidewalk.name, user.name)
+
+formula1 <- create.formula(outcome.name = species.name, input.names = inputs1)
+
+methods.name <- c("Bagging", "Classification Tree", "XGboost", "Random Forest", "LASSO Regression", "Ridge Regression", "Multiple Linear Logistic Regression", "Neural Networks")
+```
+
+```{r read_data, include = FALSE, eval = TRUE}
+# Please change the directory name accordingly
+directory.name <- "/Users/Linh/Desktop/GR5241/FINAL/"
+
+trees <- readRDS(paste(directory.name, "trees.rds", sep = ""))
+trees3 <- readRDS(paste(directory.name, "trees3.rds", sep = ""))
+model.bag <- readRDS(paste(directory.name, "model.bag.rds", sep = ""))
+model.ct <- readRDS(paste(directory.name, "model.ct.rds", sep = ""))
+model.lasso <- readRDS(paste(directory.name, "model.lasso.rds", sep = ""))
+model.log <- readRDS(paste(directory.name, "model.log.rds", sep = ""))
+model.nnet <- readRDS(paste(directory.name, "model.nnet.rds", sep = ""))
+model.rf <- readRDS(paste(directory.name, "model.rf.rds", sep = ""))
+model.ridge <- readRDS(paste(directory.name, "model.ridge.rds", sep = ""))
+model.xgb <- readRDS(paste(directory.name, "model.bag.rds", sep = ""))
+
+# It is also possible to load ONLY the following file that contains all above:
+#load(paste(directory.name, "S5241_Final_Data.RData", sep = ""))
+
+uniq.health <- unique(trees3$health)
+uniq.trnk1 <- unique(trees3$trnk_wire)
+uniq.trnk2 <- unique(trees3$trnk_light)
+uniq.trnk3 <- unique(trees3$trnk_other)
+uniq.root1 <- unique(trees3$root_stone)
+uniq.root2 <- unique(trees3$root_grate)
+uniq.root3 <- unique(trees3$root_other)
+uniq.brnch1 <- unique(trees3$brnch_ligh)
+uniq.brnch2 <- unique(trees3$brnch_shoe)
+uniq.brnch3 <- unique(trees3$brnch_othe)
+uniq.boro <- unique(trees3$boroname)
+uniq.dbh <- unique(trees3$tree_dbh)
+uniq.stew <- unique(trees3$steward)
+uniq.guards <- unique(trees3$guards)
+uniq.curb <- unique(trees3$curb_loc)
+uniq.side <- unique(trees3$sidewalk)
+uniq.user <- unique(trees3$user_type)
+```
+
+Introduction
+=====================================  
+
+We are analyzing data from the 2015 NYC Street Trees Census covering a variety of tree species and their attributes.  
+
+Volunteers recorded the location, size, species, and condition of all public curbside trees.
+
+CONTENTS:
+
+1. EDA: Cleaned Original Data
+
+Cleaned original data does not include entries with NA values.
+
+- The first tab includes frequency plots for categorical variables of interest.
+- The second tab includes histograms for continuous variables of interest.
+- The third tab includes the graph of the NYC map based on latitude and longtitude colored by a variable of interest.
+
+2. EDA: Final Dataset
+
+The final dataset consists of 19 variables: 
+
+* potential independent variables: 9 binary variables coded 1 if yes and 0 if no for tree problems (root, branch, trunk), tree diameter at breast height, borough, health, presence of tree guards, sidewalk damage, curb (on or offset from), senate state, user type (who collected the data), and stewardship (any signs of care that promoted the tree’s health)
+* dependent variable: tree species.
+
+This section contains barplots, cross tables and chi-squared test of independence for the species type and seleceted independent variable.
+
+3. Machine Learning Methods
+
+- The first tab includes the list of machine learning methods used to predict tree species, with the percentage of correctly classified tree types. The calculations were made based on the training and test sets from the other Rmd file.
+- The second tab allows the user to select a predicting method, and specific values for independent valuables. The output is the predicted tree type.
+
+NOTE: Please allow up to 30 seconds for the tabs and plots to load. In case the tabs are not visible, please open full screen or view in browser.
+
+EDA: Cleaned Original Data
+===================================
+
+Column {.tabset}
+-------------------------------------
+
+### Categorical Variables
+
+```{r categorical}
+inputPanel(
+  selectInput(inputId = "cat.var", label = "Select a Categorical Variable:", choices = cat.names, selected = cat.names[1]))
+
+renderPlot({
+  dat <- trees[, .N, by = eval(input$cat.var)]
+  setorder(dat, by = -N)
+  names(dat) <- c("feature", "N")
+  dat$feature <- factor(dat$feature, levels = dat$feature)
+  ggplot(dat, aes(feature, N, fill = feature)) +
+  geom_bar(stat = "identity") + xlab("") + theme_classic() + 
+  theme(axis.text.x = element_blank()) + 
+  theme(panel.grid = element_blank()) +   
+  theme(axis.ticks = element_blank()) + ylab("count") + ggtitle(paste("Number of Trees by", input$cat.var)) +
+  theme(plot.title = element_text(hjust = 0.8))
+}, height = 500, width = 1100)
+```
+
+### Continuous Variables
+
+```{r continuous}
+inputPanel(
+  selectInput(inputId = "con.var", label = "Select a Continuous Variable:", choices = con.names, selected = con.names[1]))
+
+renderPlot({
+  dat <- trees[,.SD, .SDcols = eval(input$con.var)]
+  hist(dat)
+}, height = 500, width = 500)
+```
+
+### Map
+
+```{r map}
+inputPanel(
+  selectInput(inputId = "cat.var2", label = "Select a Categorical Variable:", choices = cat.names, selected = cat.names[1]))
+
+renderPlot({
+  sub <- trees[,.SD, .SDcols = eval(input$cat.var2)]
+  names(sub) <- c("factors")
+  sub$thef <- factor(sub$factors)
+  ggplot(trees, aes(longitude, Latitude, colour = sub$factors)) + geom_point()
+}, height = 550, width = 1000)
+```
+
+EDA: Final Dataset
+===================================
+
+Column {data-width = 600}
+-------------------------------------
+
+### Barplot
+
+```{r barplot}
+inputPanel(
+  selectInput(inputId = "bp1", label = "Select an Independent Variable:", choices = inputs1, selected = inputs1[1]))
+
+renderPlot({
+  dat2 <- trees3[, .SD, .SDcols = eval(input$bp1)]
+  names(dat2) <- "bp1"
+  sub2 <- data.frame(table(trees3$spc_common, dat2$bp1))
+  names(sub2) <- c("Species","Variable","Count")
+
+  ggplot(data = sub2, aes(x = Species, y = Count, fill = Variable)) + geom_bar(stat = "identity")
+  #sub2 <- trees[,.SD, .SDcols = c(species.name, input$bp)]
+  #names(sub2) <- c("species", "bp")
+  #sub2$species <- factor(sub$species)
+  #sub2$bp <- factor(sub$bp)
+  #ggplot(sub2, aes(species, ..count..)) + geom_bar(aes(fill = bp), position = "dodge")
+}, height = 500, width = 500)
+```
+
+Column {data-width = 400}
+-------------------------------------
+
+### Table of Proportions for Each Species
+
+```{r, fig.height = 12}
+inputPanel(
+  selectInput(inputId = "tab1", label = "Select an Independent Variable:", choices = inputs1, selected = inputs1[1]))
+
+renderTable({
+  dat3 <- trees3[, .SD, .SDcols = eval(input$tab1)]
+  names(dat3) <- "tab1"
+  table1 <- table(trees3$spc_common, dat3$tab1)
+  table1 <- data.frame(round.numerics(prop.table(table1, 1)*100, digits = 1))
+  setorder(table1, by = Var1)
+  names(table1) <- c("Species", input$tab1, "Percentage")
+  table1
+})
+```
+
+### Chi-squared Test for Independence
+
+```{r chisq}
+inputPanel(
+  selectInput(inputId = "chisq1", label = "Select an Independent Variable:", choices = inputs1, selected = inputs1[1]))
+
+renderTable({
+  dat4 <- trees3[, .SD, .SDcols = eval(input$chisq1)]
+  names(dat4) <- "chisq1"
+  test <- chisq.test(trees3$spc_common, dat4$chisq1)
+  data.frame(Statistic = test$statistic, df = test$parameter, Pvalue = test$p.value)
+})
+```
+
+Machine Learning Models
+===================================
+
+Column {.tabset}
+-------------------------------------
+
+### Summary of Methods
+
+```{r}
+renderDataTable({
+  table2 <- data.table("Method" = c(methods.name), "Percentage.Correctly.Classified" = 100*c(0.7375216, 0.6674015, 0.6982823, 0.7185364, 0.634022, 0.5128465, 0.6674015, 0.6942378))
+  setorderv(table2, cols = "Percentage.Correctly.Classified", -1)
+  datatable(table2)
+})
+```
+
+### Predicting Tree Type
+
+```{r models_input}
+inputPanel(
+  selectInput(inputId = "type.mod", label = "Model", choices = methods.name, selected = methods.name[2], multiple = FALSE),
+  selectInput(inputId = "health", label = "Health", choices = uniq.health, selected = uniq.health[1], multiple = FALSE),
+  selectInput(inputId="trnk1", label = "Trunk Wire", choices = uniq.trnk1, selected = uniq.trnk1[1], multiple = FALSE),
+  selectInput(inputId="trnk2", label = "Trunk Light", choices = uniq.trnk2, selected = uniq.trnk2[1], multiple = FALSE),
+  selectInput(inputId="trnk3", label = "Trunk Other", choices = uniq.trnk3, selected = uniq.trnk3[1], multiple = FALSE),
+  selectInput(inputId="root1", label = "Root Stone", choices = uniq.root1, selected = uniq.root1[1], multiple = FALSE),
+  selectInput(inputId="root2", label = "Root Grate", choices = uniq.root2, selected = uniq.root2[1], multiple = FALSE),
+  selectInput(inputId="root3", label = "Root Other", choices = uniq.root3, selected = uniq.root3[1], multiple = FALSE),
+  selectInput(inputId="brnch1", label = "Branch Light", choices = uniq.brnch1, selected = uniq.brnch1[1], multiple = FALSE),
+  selectInput(inputId="brnch2", label = "Branch Shoe", choices = uniq.brnch2, selected = uniq.brnch2[1], multiple = FALSE),
+  selectInput(inputId="brnch3", label = "Branch Other", choices = uniq.brnch3, selected = uniq.brnch3[1], multiple = FALSE),
+  selectInput(inputId="boro", label = "Borough", choices = uniq.boro, selected = uniq.boro[1], multiple = FALSE),
+  selectInput(inputId="dbh", label = "Diameter at Breast Height", choices = uniq.dbh, selected = uniq.dbh[1], multiple = FALSE),
+  selectInput(inputId="stew", label = "Steward", choices = uniq.stew, selected = uniq.stew[1], multiple = FALSE),
+  selectInput(inputId="guards", label = "Guards", choices = uniq.guards, selected = uniq.guards[1], multiple = FALSE),
+  selectInput(inputId="curb", label = "Curb", choices = uniq.curb, selected = uniq.curb[1], multiple = FALSE),
+  selectInput(inputId="side", label = "Sidewalk", choices = uniq.side, selected = uniq.side[1], multiple = FALSE),
+  selectInput(inputId="user", label = "User Type", choices = uniq.user, selected = uniq.user[1], multiple = FALSE)
+)
+
+renderDataTable({
+  newx <- data.table(health = as.factor(input$health))
+  newx[, eval(trnk1.name) := as.factor(input$trnk1)]
+  newx[, eval(trnk2.name) := as.factor(input$trnk2)]
+  newx[, eval(trnk3.name) := as.factor(input$trnk3)]
+  newx[, eval(root1.name) := as.factor(input$root1)]
+  newx[, eval(root2.name) := as.factor(input$root2)]
+  newx[, eval(root3.name) := as.factor(input$root3)]
+  newx[, eval(brnch1.name) := as.factor(input$brnch1)]
+  newx[, eval(brnch2.name) := as.factor(input$brnch2)]
+  newx[, eval(brnch3.name) := as.factor(input$brnch3)]
+  newx[, eval(boro.name) := as.factor(input$boro)]
+  newx[, eval(dbh.name) := as.numeric(input$dbh)]
+  newx[, eval(steward.name) := as.factor(input$stew)]
+  newx[, eval(guards.name) := as.factor(input$guards)]
+  newx[, eval(curb.name) := as.factor(input$curb)]
+  newx[, eval(sidewalk.name) := as.factor(input$side)]
+  newx[, eval(user.name) := as.factor(input$user)]
+
+  if(input$type.mod == "Bagging"){
+    pred <- predict(object = model.bag, newdata = newx, type = "class")
+  }
+  if(input$type.mod == "Neural Networks"){
+    pred <- predict(object = model.nnet, newdata = newx, type = "class")
+  }
+  if(input$type.mod == "Multinomial Linear Logistic Regression"){
+    pred <- predict(object = model.log, newdata = newx, type = "class")
+  }
+  
+  if(input$type.mod == "XGboost"){
+    pred <- predict(object = model.xgb, newdata = newx, type = "class")
+  }
+  
+  if(input$type.mod == "Random Forest"){
+    newx$health <- factor(newx$health, levels = levels(trees3$health))
+    newx$trnk_wire <- factor(newx$trnk_wire, levels = levels(trees3$trnk_wire))
+    newx$trnk_light <- factor(newx$trnk_light, levels = levels(trees3$trnk_light))
+    newx$trnk_other <- factor(newx$trnk_other, levels = levels(trees3$trnk_other))
+    newx$root_stone <- factor(newx$root_stone, levels = levels(trees3$root_stone))
+    newx$root_grate <- factor(newx$root_grate, levels = levels(trees3$root_grate))
+    newx$root_other <- factor(newx$root_other, levels = levels(trees3$root_other))
+    newx$brnch_ligh <- factor(newx$brnch_ligh, levels = levels(trees3$brnch_ligh))
+    newx$brnch_shoe <- factor(newx$brnch_shoe, levels = levels(trees3$brnch_shoe))
+    newx$brnch_othe <- factor(newx$brnch_othe, levels = levels(trees3$brnch_othe))
+    newx$boroname <- factor(newx$boroname, levels = levels(trees3$boroname))
+    newx$steward <- factor(newx$steward, levels = levels(trees3$steward))
+    newx$guards <- factor(newx$guards, levels = levels(trees3$guards))
+    newx$curb_loc <- factor(newx$curb_loc, levels = levels(trees3$curb_loc))
+    newx$sidewalk <- factor(newx$sidewalk, levels = levels(trees3$sidewalk))
+    newx$user_type <- factor(newx$user_type, levels = levels(trees3$user_type))
+    
+    pred <- predict(object = model.rf, newdata = newx, type = "class")
+  }
+  
+  if(input$type.mod == "LASSO Regression"){
+    newx$health <- factor(newx$health, levels = levels(trees3$health))
+    newx$trnk_wire <- factor(newx$trnk_wire, levels = levels(trees3$trnk_wire))
+    newx$trnk_light <- factor(newx$trnk_light, levels = levels(trees3$trnk_light))
+    newx$trnk_other <- factor(newx$trnk_other, levels = levels(trees3$trnk_other))
+    newx$root_stone <- factor(newx$root_stone, levels = levels(trees3$root_stone))
+    newx$root_grate <- factor(newx$root_grate, levels = levels(trees3$root_grate))
+    newx$root_other <- factor(newx$root_other, levels = levels(trees3$root_other))
+    newx$brnch_ligh <- factor(newx$brnch_ligh, levels = levels(trees3$brnch_ligh))
+    newx$brnch_shoe <- factor(newx$brnch_shoe, levels = levels(trees3$brnch_shoe))
+    newx$brnch_othe <- factor(newx$brnch_othe, levels = levels(trees3$brnch_othe))
+    newx$boroname <- factor(newx$boroname, levels = levels(trees3$boroname))
+    newx$steward <- factor(newx$steward, levels = levels(trees3$steward))
+    newx$guards <- factor(newx$guards, levels = levels(trees3$guards))
+    newx$curb_loc <- factor(newx$curb_loc, levels = levels(trees3$curb_loc))
+    newx$sidewalk <- factor(newx$sidewalk, levels = levels(trees3$sidewalk))
+    newx$user_type <- factor(newx$user_type, levels = levels(trees3$user_type))
+    newx$spc_common <- factor(newx$spc_common, levels = levels(trees3$spc_common))
+    x.y.test <- create.x.and.y(formula1, newx)
+    
+    pred <- predict(object = model.lasso, newx = x.y.test$x, type = "class")
+  }
+  
+  if (input$type.mod == "Ridge Regression"){
+    newx$health <- factor(newx$health, levels = levels(trees3$health))
+    newx$trnk_wire <- factor(newx$trnk_wire, levels = levels(trees3$trnk_wire))
+    newx$trnk_light <- factor(newx$trnk_light, levels = levels(trees3$trnk_light))
+    newx$trnk_other <- factor(newx$trnk_other, levels = levels(trees3$trnk_other))
+    newx$root_stone <- factor(newx$root_stone, levels = levels(trees3$root_stone))
+    newx$root_grate <- factor(newx$root_grate, levels = levels(trees3$root_grate))
+    newx$root_other <- factor(newx$root_other, levels = levels(trees3$root_other))
+    newx$brnch_ligh <- factor(newx$brnch_ligh, levels = levels(trees3$brnch_ligh))
+    newx$brnch_shoe <- factor(newx$brnch_shoe, levels = levels(trees3$brnch_shoe))
+    newx$brnch_othe <- factor(newx$brnch_othe, levels = levels(trees3$brnch_othe))
+    newx$boroname <- factor(newx$boroname, levels = levels(trees3$boroname))
+    newx$steward <- factor(newx$steward, levels = levels(trees3$steward))
+    newx$guards <- factor(newx$guards, levels = levels(trees3$guards))
+    newx$curb_loc <- factor(newx$curb_loc, levels = levels(trees3$curb_loc))
+    newx$sidewalk <- factor(newx$sidewalk, levels = levels(trees3$sidewalk))
+    newx$user_type <- factor(newx$user_type, levels = levels(trees3$user_type))
+    newx$spc_common <- "Callery pear"
+    newx$spc_common <- factor(newx$spc_common, levels = levels(trees3$spc_common))
+    x.y.test <- create.x.and.y(formula1, newx)
+    pred <- predict(object = model.ridge, newx = x.y.test$x, type = "class")[[1]]
+  }
+  
+  else {
+    pred <- predict(object = model.ct, newdata = newx, type = "class")
+  }
+  
+  tab2 <- data.table(Model = input$type.mod, Tree.Type = pred)
+  datatable(tab2)
+ })
+```
