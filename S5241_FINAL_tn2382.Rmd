@@ -1,0 +1,434 @@
+---
+title: "S5241_FINAL"
+author: "Nguyen Thuy Linh, tn2382"
+date: "6/22/2019"
+output: html_document
+---
+
+```{r libraries, message = FALSE}
+# We load all needed libraries
+library(data.table)
+library(DT)
+library(ggplot2)
+library(glmnet)
+library(nnet)
+library(MASS)
+library(rpart)
+library(ipred)
+library(randomForest)
+library(caret)
+```
+
+```{r names_and_constants}
+# We create constants needed for analysis
+species.name <- "spc_common"
+root1.name <- "root_stone"
+root2.name <- "root_grate"
+root3.name <- "root_other"
+trnk1.name <- "trnk_wire"
+trnk2.name <- "trnk_light"
+trnk3.name <- "trnk_other"
+brnch1.name <- "brnch_ligh"
+brnch2.name <- "brnch_shoe"
+brnch3.name <- "brnch_othe"
+health.name <- "health"
+boro.name <- "boroname"
+senate.name <- "st_senate"
+dbh.name <- "tree_dbh"
+steward.name <- "steward"
+guards.name <- "guards"
+sidewalk.name <- "sidewalk"
+curb.name <- "curb_loc"
+user.name <- "user_type"
+
+inputs1 <- c(health.name, trnk1.name, trnk2.name, trnk3.name, root1.name, root2.name, root3.name, brnch1.name, brnch2.name, brnch3.name, boro.name, dbh.name, steward.name, guards.name, curb.name, sidewalk.name, user.name)
+inputs2 <- c(health.name, trnk1.name, trnk2.name, trnk3.name, root1.name, root2.name, root3.name, brnch1.name, brnch2.name, brnch3.name, senate.name, dbh.name, steward.name, guards.name, curb.name, sidewalk.name, user.name)
+
+formula1 <- create.formula(outcome.name = species.name, input.names = inputs1)
+formula2 <- create.formula(outcome.name = species.name, input.names = inputs2)
+```
+
+```{r functions}
+# Functions below were written by professor David Shilane
+round.numerics <- function(x, digits = 0, nearest = 1){
+  if(is.numeric(x)){
+    return(nearest * round(x = x/nearest, digits = digits))
+  }
+  else{
+    return(x)
+  }
+}
+
+create.formula <- function(outcome.name, input.names, input.patterns = NA, all.data.names = NA, include.backtick = "as.needed", return.as = "formula"){
+  
+  variable.names.from.patterns <- c()
+  if(!is.na(input.patterns[1]) & !is.na(all.data.names[1])){
+    pattern <- paste(input.patterns, collapse = "|")
+    variable.names.from.patterns <- all.data.names[grep(pattern = pattern, x = all.data.names)]
+  }
+  all.input.names <- unique(c(input.names, variable.names.from.patterns))
+  all.input.names <- all.input.names[all.input.names != outcome.name]
+  
+  if(!is.na(all.data.names[1])){
+    all.input.names <- all.input.names[all.input.names %in% all.data.names]
+  }
+
+  input.names.delineated <- add.backtick(x =  all.input.names, include.backtick = include.backtick)
+  outcome.name.delineated <- add.backtick(x = outcome.name, include.backtick = include.backtick)
+  the.formula <- sprintf("%s ~ %s", outcome.name.delineated, paste(input.names.delineated, collapse = "+"))
+  
+  if(return.as == "formula"){
+    return(as.formula(the.formula))
+  }
+  if(return.as != "formula"){
+    return(the.formula)
+  }
+}
+
+add.backtick <- function(x, include.backtick = "as.needed"){
+  if(include.backtick == "all"){
+    w <- 1:length(x)
+  }
+  if(include.backtick == "as.needed"){
+    w <- grep(pattern = " ", x = x, fixed = TRUE)
+  }  
+  if(length(w) > 0){
+    x[w] <- sprintf("`%s`", x[w])
+  }
+
+  return(x)
+}
+
+create.x.and.y <- function(the.formula, data) {
+    require(data.table)
+    setDT(data)
+    x <- model.matrix(object = as.formula(the.formula), 
+        data = data)
+    y.name <- trimws(x = gsub(pattern = "`", replacement = "", 
+        x = strsplit(x = as.character(the.formula), split = "~")[[2]][1], 
+        fixed = TRUE))
+    y <- data[as.numeric(rownames(x)), get(y.name)]
+    return(list(x = x, y = y))
+}
+
+```
+
+# Importing data
+
+```{r import_data, warning = FALSE, message = FALSE}
+data.trees <- fread("2015StreetTreesCensus_TREES.csv", header = TRUE, na.strings = c("", "NA"), stringsAsFactors = TRUE)
+```
+
+```{r}
+# Explore column names and dimensions of the data
+names(data.trees)
+dim(data.trees)
+```
+
+# Data Pre-processing and Initial EDA
+
+We will explore all reasonable variables. For instance, it does not benefit us to explore tree id or date when the data was collected. Also, some variables are exactly the same but coded differently, for example nta and nta_name. There are many correlated variables for location, therefore we will decide later which ones to include in our further analysis.
+
+```{r pre_processing}
+# Since our sample size is large, we can omit all observations with NA values without losing too many cases:
+trees <- na.omit(data.trees)
+dim(trees)
+# If we want to include stump_diam in our analysis, we should deal with the 0's
+# Let's see how many 0's there are:
+trees[stump_diam == 0, .N]
+# If we turn the 0's to missing values, we will be left with 14016 observations
+trees$stump_diam <- ifelse(trees$stump_diam == 0, NA, trees$stump_diam)
+trees[,.N, by = stump_diam]
+# How many complete observations:
+trees[complete.cases(trees),]
+# Seems like the observations that have a value greater than 0 as stump diameter all have missing values elsewhere, especially in the health variable of our interest. Hence, it is not a good idea to include stump_diam in our analysis. We can use the diameter at breast height instead.
+```
+
+```{r eda_health}
+# Count the number of trees in each health category
+treeshealth <- trees[, .N, by = health]
+setorder(treeshealth, by = -N)
+treeshealth$`health` <- factor(treeshealth$`health`, levels = treeshealth$`health`)
+ggplot(treeshealth, aes(`health`, N, fill = `health`)) +
+  geom_bar(stat = "identity") + xlab("") + theme_classic() + 
+  theme(axis.text.x = element_blank()) + 
+  theme(panel.grid = element_blank()) +   
+  theme(axis.ticks = element_blank()) + ylab("count") + ggtitle("Number of Trees by Health")+
+  theme(plot.title = element_text(hjust = 0.8))
+```
+
+```{r eda_borough}
+# Count the number of trees in each borough 
+treesboro <- trees[, .N, by = boroname]
+setorder(treesboro, by = -N)
+treesboro$`boroname` <- factor(treesboro$`boroname`, levels = treesboro$`boroname`)
+ggplot(treesboro, aes(`boroname`, N, fill = `boroname`)) +
+  geom_bar(stat = "identity") + xlab("") + theme_classic() + 
+  theme(axis.text.x = element_blank()) + 
+  theme(panel.grid = element_blank()) +   
+  theme(axis.ticks = element_blank()) + ylab("count") + ggtitle("Number of Trees by Borough")   + theme(plot.title = element_text(hjust = 0.8))
+
+# Proportion of trees with the three levels of health by borough
+table1 <- table(trees$boroname, trees$health)
+round.numerics(prop.table(table1, 1)*100, digits = 1)
+```
+
+
+```{r eda_species}
+# Explore the distribution of species of trees
+ordered.trees <- trees[, .N, keyby = spc_common]
+setorderv(ordered.trees, cols = "N", -1)
+ordered.trees[1:10,]
+# How many unique species are there?
+trees[,length(unique(spc_common))]
+# Proportion of trees with the three levels of health by species
+table2 <- table(trees$spc_common, trees$health)
+head(round.numerics(prop.table(table2, 1)*100, digits = 1))
+```
+
+```{r eda_problems}
+# Explore the distribution of problems of trees
+trees[, .N, keyby = problems]
+# How many unique problems are there?
+trees[,length(unique(problems))] # doesn't seem like the problems variable would be a good predictor
+# It might be better to just use the given binary variables for all the problems
+#data.trees[, .N, keyby = root_stone]
+trees$root_stone <- as.factor(ifelse(trees$root_stone == "Yes", 1, 0))
+#data.trees[, .N, keyby = root_grate]
+trees$root_grate <- as.factor(ifelse(trees$root_grate == "Yes", 1, 0))
+#data.trees[, .N, keyby = root_other]
+trees$root_other <- as.factor(ifelse(trees$root_other == "Yes", 1, 0))
+#data.trees[, .N, keyby = trnk_wire]
+trees$trnk_wire <- as.factor(ifelse(trees$trnk_wire == "Yes", 1, 0))
+#data.trees[, .N, keyby = trnk_light]
+trees$trnk_light <- as.factor(ifelse(trees$trnk_light == "Yes", 1, 0))
+#data.trees[, .N, keyby = trnk_other]
+trees$trnk_other <- as.factor(ifelse(trees$trnk_other == "Yes", 1, 0))
+#data.trees[, .N, keyby = brnch_ligh]
+trees$brnch_ligh <- as.factor(ifelse(trees$brnch_ligh == "Yes", 1, 0))
+#data.trees[, .N, keyby = brnch_shoe]
+trees$brnch_shoe <- as.factor(ifelse(trees$brnch_shoe == "Yes", 1, 0))
+#data.trees[, .N, keyby = brnch_othe]
+trees$brnch_othe <- as.factor(ifelse(trees$brnch_othe == "Yes", 1, 0))
+```
+
+```{r eda_tree_tbh}
+# Diameter at breast height
+hist(trees$tree_dbh)
+summary(trees$tree_dbh)
+trees[tree_dbh == 0, .N]
+# Observations with 0 diameter should probably be considered as NA values:
+trees$tree_dbh <- ifelse(trees$tree_dbh == 0, NA, trees$tree_dbh)
+```
+
+```{r eda_user}
+# Explore types of users
+trees[,length(unique(user_type))]
+table(trees[,user_type])
+```
+
+```{r eda_location}
+# We will explore some location variables
+trees[,length(unique(nta_name))] # 188 is too many categories, most likely won't be a good predictor, same with nta variable
+trees[,length(unique(state))] # making sure all trees are from New York state
+trees[,length(unique(zip_city))] # 48 zip cities
+trees[,length(unique(st_assem))] # 65 different state essemblies
+trees[,length(unique(st_senate))] # 26 different state senates, could be better than borough
+trees[,length(unique(cncldist))] # 51 different distances
+```
+
+```{r eda_curb_steward_guards_sidewalk}
+# Explore other important variables
+table(trees[,curb_loc]) # is the tree on curb
+table(trees[,steward]) # how many stewards
+table(trees[,guards]) # are there guards
+table(trees[,sidewalk]) # is there damage to the sidewalk
+```
+
+# Final Data set
+
+We choose to keep the top 3 most common tree species and chosen potential independent variables. All explanations will be included in the written report.
+
+```{r obtain_finaldataset}
+#saveRDS(trees, "trees.rds")
+# Obtain a sudata with variables of interest 
+trees.s <- trees[, .SD, .SDcols = c(species.name, health.name, trnk1.name, trnk2.name, trnk3.name, root1.name, root2.name, root3.name, brnch1.name, brnch2.name, brnch3.name, boro.name, senate.name, steward.name, guards.name, user.name, curb.name, sidewalk.name, dbh.name)]
+# Order the tree types by frequency
+type <- trees.s[, .N, by = species.name]
+setorder(type, -N)
+# Extract top 3 tree species
+type.3 <- type[1:3, get(species.name)]
+trees3 <- trees.s[get(species.name) %in% type.3, ] # only keep the top 3 tree types
+dim(trees3)
+trees3 <- na.omit(trees3) # making sure there's no NA in the data
+dim(trees3)
+apply(trees3, 2, function(x) any(is.na(x) | is.infinite(x)))
+trees3[,.N, by = spc_common]
+trees3$spc_common <- factor(trees3$spc_common)
+str(trees3)
+trees3[,.N, by = spc_common]
+trees3$spc_common <- factor(trees3$spc_common)
+str(trees3)
+#saveRDS(trees3, file = "trees3.rds")
+```
+
+# Perform further exploratory data analysis on the final data set
+
+We will explore the relationships between the dependent variable, the tree species **species_type** and potential independent variables. We create cross tables and perform Chi-squared test for indepedence of two categorical variables.
+
+```{r}
+# Health 
+table2 <- table(trees3$spc_common, trees3$health)
+round.numerics(prop.table(table2, 1)*100, digits = 1)
+chisq.test(trees3$spc_common, trees3$health)
+```
+
+```{r}
+# Borough 
+table3 <- table(trees3$spc_common, trees3$boroname)
+round.numerics(prop.table(table3, 1)*100, digits = 1)
+chisq.test(trees3$spc_common, trees3$boroname)
+```
+
+```{r}
+# Stewardship
+table4 <- table(trees3$spc_common, trees3$steward)
+round.numerics(prop.table(table4, 1)*100, digits = 1)
+chisq.test(trees3$spc_common, trees3$steward)
+```
+
+```{r}
+# Guards
+table5 <- table(trees3$spc_common, trees3$guards)
+round.numerics(prop.table(table5, 1)*100, digits = 1)
+chisq.test(trees3$spc_common, trees3$guards)
+```
+
+```{r}
+# Curb location
+table6 <- table(trees3$spc_common, trees3$curb_loc)
+round.numerics(prop.table(table6, 1)*100, digits = 1)
+chisq.test(trees3$spc_common, trees3$curb_loc)
+```
+
+```{r}
+# Sidewalk Damage
+table7 <- table(trees3$spc_common, trees3$sidewalk)
+round.numerics(prop.table(table7, 1)*100, digits = 1)
+chisq.test(trees3$spc_common, trees3$sidewalk)
+```
+
+It seems that damage and no damage in the sidewalk has an effect on the species type.
+
+```{r}
+# State senate
+#table8 <- table(trees3$spc_common, trees3$st_senate)
+#round.numerics(prop.table(table8, 1)*100, digits = 1)
+chisq.test(trees3$spc_common, trees3$st_senate)
+```
+
+```{r}
+# User type
+table9 <- table(trees3$spc_common, trees3$user_type)
+round.numerics(prop.table(table9, 1)*100, digits = 1)
+chisq.test(trees3$spc_common, trees3$user_type)
+```
+
+# Machine Learning Models
+
+We first divide data into training and test sets, with approximate proportion of 70:30, respectively.
+
+```{r train_test}
+# We now split data into train and test sets with proportion approx. 70:30
+set.seed(1)
+n <- length(trees3$spc_common)
+n.train <- round(0.7*n)
+n.test <- n - n.train
+inds.train <- sample(1:n, n.train)
+inds.test <- setdiff(1:n, inds.train)
+train <- trees3[inds.train, ]
+test <- trees3[inds.test, ]
+#saveRDS(train, file = "train.rds")
+#saveRDS(test, file = "test.rds")
+```
+
+We will fit 8 different models to the training data and then predict the tree classes for the test data. Then we will calculate the proportion of correctly classified classes under 0-1 loss.
+
+## 1.Multiple Linear Logistic Regression
+
+```{r mult}
+model.log <- multinom(formula1, data = train)
+#saveRDS(model.log, file = "model.log.rds")
+pred.log <- predict(model.log, newdata = test[,.SD, .SDcols = inputs1], type = "class")
+mean(pred.log == test[, get(species.name)]) # 0.6674015
+```
+
+## 2. Classification Tree
+
+```{r classification_tree}
+model.ct <- rpart(formula = as.formula(formula1), data = train)
+#saveRDS(model.log, file = "model.ct.rds")
+pred.ct <- predict(object = model.ct, newdata = test, type = "class")
+mean(pred.ct == test[, get(species.name)]) # 0.6674015
+```
+
+## 3. Bagging
+
+```{r bagging}
+model.bag <- bagging(as.formula(formula1), data = train)
+#saveRDS(model.bag, file = "model.bag.rds")
+pred.bag <- predict(object = model.bag, newdata = test, type = "class")
+mean(pred.bag == test[, get(species.name)]) # 0.7375216
+```
+
+## 4. Random Forest
+
+```{r random_forest}
+model.rf <- randomForest(formula = as.formula(formula1), data = train)
+#saveRDS(model.rf, file = "model.rf.rds")
+pred.rf <- predict(model.rf, newdata = test)
+mean(pred.rf == test[, get(species.name)]) # 0.7185364
+```
+
+## 5. Ridge Regression
+
+```{r ridge}
+# We use the create.x.and.y function to obtain appropriate forms of the inputs to glmnet()
+x.y.train <- create.x.and.y(the.formula = formula1, data = train)
+x.y.test <- create.x.and.y(the.formula = formula1, data = test)
+
+model.ridge <- glmnet(x = x.y.train$x, y = x.y.train$y, family = "multinomial", alpha = 0)
+#saveRDS(model.ridge, file = "model.ridge.rds")
+pred.ridge <- predict(object = model.ridge, newx = x.y.test$x, type = "class")
+mean(pred.ridge == test[, get(species.name)]) # 0.5128465
+```
+
+## 6. Lasso Regression
+
+```{r lasso}
+model.lasso <- glmnet(x = x.y.train$x, y = x.y.train$y, family = "multinomial", alpha = 1)
+#saveRDS(model.lasso, file = "model.lasso.rds")
+pred.lasso <- predict(object = model.lasso, newx = x.y.test$x, type = "class")
+mean(pred.lasso == test[, get(species.name)]) # 0.634022
+```
+
+## 7. Neural Networks
+
+```{r neural_networks}
+model.nnet <- nnet(as.formula(formula1), train, size = 15 , decay = 5e-4, linout = TRUE, maxit = 200)
+#saveRDS(model.nnet, file = "model.nnet.rds")
+pred.nnet <- predict(object = model.nnet, newdata = test, type = "class")
+mean(pred.nnet == test[, get(species.name)])
+```
+
+## 8. XGboost
+
+```{r xgboost}
+# XGboost cross validated with 4 folds
+model.xgb <- train(form = as.formula(formula1), data = train, method = "xgbTree", trControl = trainControl("cv", number = 4))
+#saveRDS(model.xgb, file = "model.xgb.rds")
+pred.xgb <- predict(object = model.xgb, newdata = test, type = "raw")
+mean(pred.xgb == test[, get(species.name)]) # 0.6982823
+```
+
+Please refer to the Reporting Engine file for all results in a neat form.
